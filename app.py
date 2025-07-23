@@ -1,134 +1,50 @@
-from dotenv import load_dotenv
-from openai import OpenAI
-import json
-import os
-import requests
-from pypdf import PdfReader
 import gradio as gr
+from sidekick import Sidekick
 
 
-load_dotenv(override=True)
+async def setup():
+    sidekick = Sidekick()
+    await sidekick.setup()
+    return sidekick
 
-def push(text):
-    requests.post(
-        "https://api.pushover.net/1/messages.json",
-        data={
-            "token": os.getenv("PUSHOVER_TOKEN"),
-            "user": os.getenv("PUSHOVER_USER"),
-            "message": text,
-        }
-    )
-
-
-def record_user_details(email, name="Name not provided", notes="not provided"):
-    push(f"Recording {name} with email {email} and notes {notes}")
-    return {"recorded": "ok"}
-
-def record_unknown_question(question):
-    push(f"Recording {question}")
-    return {"recorded": "ok"}
-
-record_user_details_json = {
-    "name": "record_user_details",
-    "description": "Use this tool to record that a user is interested in being in touch and provided an email address",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "email": {
-                "type": "string",
-                "description": "The email address of this user"
-            },
-            "name": {
-                "type": "string",
-                "description": "The user's name, if they provided it"
-            }
-            ,
-            "notes": {
-                "type": "string",
-                "description": "Any additional information about the conversation that's worth recording to give context"
-            }
-        },
-        "required": ["email"],
-        "additionalProperties": False
-    }
-}
-
-record_unknown_question_json = {
-    "name": "record_unknown_question",
-    "description": "Always use this tool to record any question that couldn't be answered as you didn't know the answer",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "question": {
-                "type": "string",
-                "description": "The question that couldn't be answered"
-            },
-        },
-        "required": ["question"],
-        "additionalProperties": False
-    }
-}
-
-tools = [{"type": "function", "function": record_user_details_json},
-        {"type": "function", "function": record_unknown_question_json}]
-
-
-class Me:
-
-    def __init__(self):
-        self.openai = OpenAI()
-        self.name = "Ed Donner"
-        reader = PdfReader("me/linkedin.pdf")
-        self.linkedin = ""
-        for page in reader.pages:
-            text = page.extract_text()
-            if text:
-                self.linkedin += text
-        with open("me/summary.txt", "r", encoding="utf-8") as f:
-            self.summary = f.read()
-
-
-    def handle_tool_call(self, tool_calls):
-        results = []
-        for tool_call in tool_calls:
-            tool_name = tool_call.function.name
-            arguments = json.loads(tool_call.function.arguments)
-            print(f"Tool called: {tool_name}", flush=True)
-            tool = globals().get(tool_name)
-            result = tool(**arguments) if tool else {}
-            results.append({"role": "tool","content": json.dumps(result),"tool_call_id": tool_call.id})
-        return results
+async def process_message(sidekick, message, success_criteria, history):
+    results = await sidekick.run_superstep(message, success_criteria, history)
+    return results, sidekick
     
-    def system_prompt(self):
-        system_prompt = f"You are acting as {self.name}. You are answering questions on {self.name}'s website, \
-particularly questions related to {self.name}'s career, background, skills and experience. \
-Your responsibility is to represent {self.name} for interactions on the website as faithfully as possible. \
-You are given a summary of {self.name}'s background and LinkedIn profile which you can use to answer questions. \
-Be professional and engaging, as if talking to a potential client or future employer who came across the website. \
-If you don't know the answer to any question, use your record_unknown_question tool to record the question that you couldn't answer, even if it's about something trivial or unrelated to career. \
-If the user is engaging in discussion, try to steer them towards getting in touch via email; ask for their email and record it using your record_user_details tool. "
+async def reset():
+    new_sidekick = Sidekick()
+    await new_sidekick.setup()
+    return "", "", None, new_sidekick
 
-        system_prompt += f"\n\n## Summary:\n{self.summary}\n\n## LinkedIn Profile:\n{self.linkedin}\n\n"
-        system_prompt += f"With this context, please chat with the user, always staying in character as {self.name}."
-        return system_prompt
-    
-    def chat(self, message, history):
-        messages = [{"role": "system", "content": self.system_prompt()}] + history + [{"role": "user", "content": message}]
-        done = False
-        while not done:
-            response = self.openai.chat.completions.create(model="gpt-4o-mini", messages=messages, tools=tools)
-            if response.choices[0].finish_reason=="tool_calls":
-                message = response.choices[0].message
-                tool_calls = message.tool_calls
-                results = self.handle_tool_call(tool_calls)
-                messages.append(message)
-                messages.extend(results)
-            else:
-                done = True
-        return response.choices[0].message.content
-    
+def free_resources(sidekick):
+    print("Cleaning up")
+    try:
+        if sidekick:
+            sidekick.free_resources()
+    except Exception as e:
+        print(f"Exception during cleanup: {e}")
 
-if __name__ == "__main__":
-    me = Me()
-    gr.ChatInterface(me.chat, type="messages").launch()
+
+with gr.Blocks(title="Sidekick", theme=gr.themes.Default(primary_hue="emerald")) as ui:
+    gr.Markdown("## Sidekick Personal Co-Worker")
+    sidekick = gr.State(delete_callback=free_resources)
     
+    with gr.Row():
+        chatbot = gr.Chatbot(label="Sidekick", height=300, type="messages")
+    with gr.Group():
+        with gr.Row():
+            message = gr.Textbox(show_label=False, placeholder="Your request to the Sidekick")
+        with gr.Row():
+            success_criteria = gr.Textbox(show_label=False, placeholder="What are your success critiera?")
+    with gr.Row():
+        reset_button = gr.Button("Reset", variant="stop")
+        go_button = gr.Button("Go!", variant="primary")
+        
+    ui.load(setup, [], [sidekick])
+    message.submit(process_message, [sidekick, message, success_criteria, chatbot], [chatbot, sidekick])
+    success_criteria.submit(process_message, [sidekick, message, success_criteria, chatbot], [chatbot, sidekick])
+    go_button.click(process_message, [sidekick, message, success_criteria, chatbot], [chatbot, sidekick])
+    reset_button.click(reset, [], [message, success_criteria, chatbot, sidekick])
+
+    
+ui.launch(inbrowser=True)
